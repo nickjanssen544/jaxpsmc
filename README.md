@@ -28,7 +28,7 @@ There are two examples.
 ## Literature
 ---
 
-1. **Compiling machine learning programs via high-level tracing
+1. **Compiling machine learning programs via high-level tracing**
    Frostig, R., Johnson, M. J., Leary, C. (2018).
    Link: https://research.google/pubs/compiling-machine-learning-programs-via-high-level-tracing/
 
