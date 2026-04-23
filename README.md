@@ -17,7 +17,7 @@ At the algorithmic level, `jaxpsmc` consists of the following components.
 ## **Examples**
 ---
 
-There are two examples.
+There are two reproducible examples.
 
 1. **Numerical experiments:** this example constructs synthetic Gaussian-mixture targets with user-controlled dimension, number of mixture components, component means, component covariances, and mixture weights. The target likelihood is known exactly and can be evaluated directly, which makes the example suitable for checking whether the sampler behaves correctly on multimodal continuous distributions with nontrivial geometry.
 
