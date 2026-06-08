@@ -6,7 +6,7 @@ from absl.testing import absltest
 
 from jaxpsmc.particles_jax import ParticlesState, ParticlesStep, init_particles_state_jax
 from jaxpsmc.prior_jax import NORMAL, Prior
-from jaxpsmc.sampler_jax import (
+from jaxpsmc.sampler.sampler_jax import (
     IdentityBijectionJAX,
     IdentityFlowJAX,
     RunOutputJAX,
@@ -40,17 +40,10 @@ class SamplerTest(chex.TestCase):
             n_steps=0,
             n_max_steps=0,
             proposal_scale=0.0,
+            kernel="pcn",
+            dili_rank=2,
+            dili_n_lis_particles=4,
             keep_max=4,
-            trim_ess=0.99,
-            bins=16,
-            bisect_steps=8,
-            sampling_mode="truncated_persistent",
-            preconditioned=False,
-            dynamic=False,
-            metric="ess",
-            resample="mult",
-            transform="probit",
-            blob_dim=0,
         )
         base.update(kwargs)
         return SamplerConfigJAX(**base)
@@ -99,6 +92,47 @@ class SamplerTest(chex.TestCase):
         assert bool(jnp.all(jnp.isfinite(out.logz)))
         assert bool(jnp.isnan(out.logz_err))
 
+    def _one_outer_step_cfg(self, *, kernel, preconditioned, **kwargs):
+        base = dict(
+            kernel=kernel,
+            preconditioned=preconditioned,
+            blob_dim=1,
+            n_prior=4,
+            n_active=4,
+            n_effective=2,
+            n_total=8,
+            n_max_steps=1,
+            n_steps=1,
+            proposal_scale=0.05,
+            keep_max=4,
+            dynamic=False,
+        )
+        base.update(kwargs)
+        return self._cfg(**base)
+
+    def _assert_one_outer_step_run(self, out, *, blob_dim=1):
+        self._assert_valid_run_output(
+            out,
+            max_steps=2,
+            n_active=4,
+            n_dim=2,
+            blob_dim=blob_dim,
+        )
+        assert int(out.state.t) == 2
+
+    def _assert_noop_mutation_step(self, out):
+        self._assert_one_outer_step_run(out, blob_dim=1)
+        np.testing.assert_allclose(out.state.steps[1], 0.0)
+        np.testing.assert_allclose(out.state.accept[1], 0.0)
+        np.testing.assert_allclose(out.state.calls[1], out.state.calls[0])
+
+    def _assert_active_mutation_step(self, out):
+        self._assert_one_outer_step_run(out, blob_dim=1)
+        assert bool(out.state.steps[1] > 0)
+        assert bool(out.state.calls[1] > 0)
+        assert bool(jnp.isfinite(out.state.accept[1]))
+        assert bool(jnp.isfinite(out.state.efficiency[1]))
+
     def test_codes(self):
         assert int(_metric_code("ess")) == 0
         assert int(_metric_code("ESS")) == 0
@@ -123,11 +157,52 @@ class SamplerTest(chex.TestCase):
         assert cfg.n_active == 4
         assert cfg.n_prior == 4
         assert cfg.n_total == 2
-        assert cfg.preconditioned is False
-        assert cfg.dynamic is False
+        assert cfg.kernel == "pcn"
+        assert cfg.preconditioned is True
+        assert cfg.dynamic is True
         assert cfg.metric == "ess"
         assert cfg.resample == "mult"
         assert cfg.sampling_mode == "truncated_persistent" 
+
+    def test_config_kernel_api(self):
+        cfg_pcn = self._cfg(kernel="pcn")
+        cfg_li = self._cfg(kernel="li_pcn")
+        cfg_dili = self._cfg(kernel="dili_pcn")
+
+        assert cfg_pcn.kernel == "pcn"
+        assert cfg_li.kernel == "li_pcn"
+        assert cfg_dili.kernel == "dili_pcn"
+
+        with self.assertRaisesRegex(ValueError, "kernel must be one of"):
+            self._cfg(kernel="none")
+        with self.assertRaisesRegex(ValueError, "kernel must be one of"):
+            self._cfg(kernel="bad")
+
+    def test_config_kernel_is_independent_from_preconditioned_flag(self):
+        cfg_pcn_noop = self._cfg(kernel="pcn", preconditioned=False)
+        cfg_li_noop = self._cfg(kernel="li_pcn", preconditioned=False)
+        cfg_dili_noop = self._cfg(kernel="dili_pcn", preconditioned=False)
+
+        cfg_pcn_active = self._cfg(kernel="pcn", preconditioned=True)
+        cfg_li_active = self._cfg(kernel="li_pcn", preconditioned=True)
+        cfg_dili_active = self._cfg(kernel="dili_pcn", preconditioned=True)
+
+        assert cfg_pcn_noop.kernel == "pcn"
+        assert cfg_li_noop.kernel == "li_pcn"
+        assert cfg_dili_noop.kernel == "dili_pcn"
+
+        assert cfg_pcn_noop.preconditioned is False
+        assert cfg_li_noop.preconditioned is False
+        assert cfg_dili_noop.preconditioned is False
+
+        assert cfg_pcn_active.kernel == "pcn"
+        assert cfg_li_active.kernel == "li_pcn"
+        assert cfg_dili_active.kernel == "dili_pcn"
+
+        assert cfg_pcn_active.preconditioned is True
+        assert cfg_li_active.preconditioned is True
+        assert cfg_dili_active.preconditioned is True
+
 
     def test_config_sampling_mode_persistent(self):
         cfg = self._cfg(sampling_mode="persistent")
@@ -495,6 +570,67 @@ class SamplerTest(chex.TestCase):
 
 
 
+
+
+    @chex.all_variants(with_pmap=False)
+    def test_run_outer_noop_pcn_kernel(self):
+        prior = self._prior(dtype=jnp.float64)
+        cfg = self._one_outer_step_cfg(kernel="pcn", preconditioned=False)
+        run = make_run_fn(
+            prior=prior,
+            loglike_single_fn=self._like_blob,
+            loglike_approx_single_fn=self._approx,
+            cfg=cfg,
+        )
+
+        out = self.variant(lambda key: run(key))(self.key)
+
+        self._assert_noop_mutation_step(out)
+
+    @chex.all_variants(with_pmap=False)
+    def test_run_outer_noop_li_pcn_kernel(self):
+        prior = self._prior(dtype=jnp.float64)
+        cfg = self._one_outer_step_cfg(kernel="li_pcn", preconditioned=False)
+        run = make_run_fn(
+            prior=prior,
+            loglike_single_fn=self._like_blob,
+            loglike_approx_single_fn=self._approx,
+            cfg=cfg,
+        )
+
+        out = self.variant(lambda key: run(key))(self.key)
+
+        self._assert_noop_mutation_step(out)
+
+    @chex.all_variants(with_pmap=False)
+    def test_run_outer_preconditioned_pcn_kernel(self):
+        prior = self._prior(dtype=jnp.float64)
+        cfg = self._one_outer_step_cfg(kernel="pcn", preconditioned=True)
+        run = make_run_fn(
+            prior=prior,
+            loglike_single_fn=self._like_blob,
+            loglike_approx_single_fn=self._approx,
+            cfg=cfg,
+        )
+
+        out = self.variant(lambda key: run(key))(self.key)
+
+        self._assert_active_mutation_step(out)
+
+    @chex.all_variants(with_pmap=False)
+    def test_run_outer_preconditioned_li_pcn_kernel(self):
+        prior = self._prior(dtype=jnp.float64)
+        cfg = self._one_outer_step_cfg(kernel="li_pcn", preconditioned=True)
+        run = make_run_fn(
+            prior=prior,
+            loglike_single_fn=self._like_blob,
+            loglike_approx_single_fn=self._approx,
+            cfg=cfg,
+        )
+
+        out = self.variant(lambda key: run(key))(self.key)
+
+        self._assert_active_mutation_step(out)
 
 
     def test_sampler_init(self):
